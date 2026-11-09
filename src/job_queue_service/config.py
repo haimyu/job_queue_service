@@ -38,7 +38,9 @@ def _parse_float_map(raw: str) -> dict[str, float]:
     """Parse 'email:10,webhook:10' into {'email': 10.0, 'webhook': 10.0}."""
     parsed = {}
     for pair in raw.split(","):
-        key, seconds = pair.split(":")  # raises ValueError unless there is exactly one colon
+        key, seconds = pair.split(
+            ":"
+        )  # raises ValueError unless there is exactly one colon
         parsed[key.strip()] = float(seconds)
     return parsed
 
@@ -58,21 +60,31 @@ def _optional[T](name: str, default: T, parse: Callable[[str], T]) -> T:
     try:
         return parse(raw)
     except ValueError as error:
-        raise ValueError(f"environment variable {name} has an invalid value: {raw!r}") from error
+        raise ValueError(
+            f"environment variable {name} has an invalid value: {raw!r}"
+        ) from error
 
 
 def load_settings() -> Settings:
-    base = Settings(database_url=_required("DATABASE_URL"), redis_url=_required("REDIS_URL"))
+    base = Settings(
+        database_url=_required("DATABASE_URL"), redis_url=_required("REDIS_URL")
+    )
     return replace(
         base,
         lease_seconds=_optional("LEASE_SECONDS", base.lease_seconds, float),
-        pop_timeout_seconds=_optional("POP_TIMEOUT_SECONDS", base.pop_timeout_seconds, float),
+        pop_timeout_seconds=_optional(
+            "POP_TIMEOUT_SECONDS", base.pop_timeout_seconds, float
+        ),
         relay_interval_seconds=_optional(
             "RELAY_INTERVAL_SECONDS", base.relay_interval_seconds, float
         ),
         job_sleep_scale=_optional("JOB_SLEEP_SCALE", base.job_sleep_scale, float),
-        webhook_failure_rate=_optional("WEBHOOK_FAILURE_RATE", base.webhook_failure_rate, float),
-        backoff_seconds=_optional("BACKOFF_SECONDS", base.backoff_seconds, _parse_float_list),
+        webhook_failure_rate=_optional(
+            "WEBHOOK_FAILURE_RATE", base.webhook_failure_rate, float
+        ),
+        backoff_seconds=_optional(
+            "BACKOFF_SECONDS", base.backoff_seconds, _parse_float_list
+        ),
         job_timeouts=_optional("JOB_TIMEOUTS", base.job_timeouts, _parse_float_map),
         log_level=_optional("LOG_LEVEL", base.log_level, str),
     )

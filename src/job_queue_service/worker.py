@@ -40,7 +40,13 @@ def record_failure(
     delay = settings.backoff_seconds[min(attempt, len(settings.backoff_seconds)) - 1]
     message = f"{type(error).__name__}: {error}"
     status = db.fail_job(
-        conn, job["id"], worker_id, attempt, message, delay, isinstance(error, PermanentJobError)
+        conn,
+        job["id"],
+        worker_id,
+        attempt,
+        message,
+        delay,
+        isinstance(error, PermanentJobError),
     )
     if status is None:
         # Nothing is running any more, so the worker drops the failure and carries on.
@@ -50,7 +56,11 @@ def record_failure(
     expected = isinstance(error, (RetryableJobError, PermanentJobError))
     outcome = "retry scheduled" if status == "pending" else "permanently failed"
     logger.warning(
-        "job attempt failed, %s: %s", outcome, message, extra=context, exc_info=None if expected else error
+        "job attempt failed, %s: %s",
+        outcome,
+        message,
+        extra=context,
+        exc_info=None if expected else error,
     )
 
 
@@ -64,13 +74,20 @@ def process_next(
     try:
         job_id = UUID(raw_id)
     except ValueError:
-        logger.warning("ignoring invalid job id in queue: %r", raw_id, extra={"worker_id": worker_id})
+        logger.warning(
+            "ignoring invalid job id in queue: %r",
+            raw_id,
+            extra={"worker_id": worker_id},
+        )
         return None
 
     job = db.claim_job(conn, job_id, worker_id, settings.lease_seconds)
     if job is None:
         # The id was stale: the job was cancelled, already claimed, or is not due yet.
-        logger.info("skipping stale queue entry", extra={"job_id": job_id, "worker_id": worker_id})
+        logger.info(
+            "skipping stale queue entry",
+            extra={"job_id": job_id, "worker_id": worker_id},
+        )
         return None
 
     context = {
@@ -84,7 +101,9 @@ def process_next(
     # The handler runs in this thread until a later phase moves it to a thread with heartbeats.
     # Whatever it raises must not kill the worker, so every exception goes through the failure path.
     try:
-        result = handlers.run_handler(job["type"], job["payload"], lambda percent: None, settings)
+        result = handlers.run_handler(
+            job["type"], job["payload"], lambda percent: None, settings
+        )
     except Exception as error:  # noqa: BLE001 - a handler must never kill the worker
         record_failure(conn, settings, job, worker_id, error, context)
         return job["id"]
@@ -105,7 +124,9 @@ def main() -> None:
     worker_id = make_worker_id()
     logger.info("worker started", extra={"worker_id": worker_id})
     r = redis_client.connect(settings.redis_url)
-    with psycopg.connect(settings.database_url, autocommit=True, row_factory=dict_row) as conn:
+    with psycopg.connect(
+        settings.database_url, autocommit=True, row_factory=dict_row
+    ) as conn:
         while True:
             process_next(conn, r, settings, worker_id)
 

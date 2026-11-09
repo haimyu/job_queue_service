@@ -26,12 +26,17 @@ def create_job(body: JobCreate, request: Request) -> dict:
     # Leaving this block commits the insert. Postgres is the source of truth,
     # so the job is durable before Redis hears about it.
     with request.app.state.pool.connection() as conn:
-        job = db.insert_job(conn, job_id, body.type, body.payload, body.priority, body.max_attempts)
+        job = db.insert_job(
+            conn, job_id, body.type, body.payload, body.priority, body.max_attempts
+        )
     try:
         redis_client.enqueue(request.app.state.redis, [job])
     except redis.RedisError:
         # Fast path only. The scheduler relay re-adds every due pending job within about a second.
-        logger.warning("could not enqueue in redis, relay will recover it", extra={"job_id": job_id})
+        logger.warning(
+            "could not enqueue in redis, relay will recover it",
+            extra={"job_id": job_id},
+        )
     logger.info("job created", extra={"job_id": job_id, "job_type": body.type})
     return job
 

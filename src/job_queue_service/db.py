@@ -19,13 +19,20 @@ def ping(conn: Connection) -> None:
     conn.execute("SELECT 1")
 
 
-def _add_log(conn: Connection, job_id: UUID, level: str, message: str, metadata: dict) -> None:
+def _add_log(
+    conn: Connection, job_id: UUID, level: str, message: str, metadata: dict
+) -> None:
     conn.execute(
         """
         INSERT INTO job_logs (job_id, level, message, metadata)
         VALUES (%(job_id)s, %(level)s, %(message)s, %(metadata)s)
         """,
-        {"job_id": job_id, "level": level, "message": message, "metadata": Jsonb(metadata)},
+        {
+            "job_id": job_id,
+            "level": level,
+            "message": message,
+            "metadata": Jsonb(metadata),
+        },
     )
 
 
@@ -52,12 +59,20 @@ def insert_job(
                 "max_attempts": max_attempts,
             },
         ).fetchone()
-        _add_log(conn, job_id, "info", "job created", {"type": job_type, "priority": priority})
+        _add_log(
+            conn,
+            job_id,
+            "info",
+            "job created",
+            {"type": job_type, "priority": priority},
+        )
     return job
 
 
 def get_job(conn: Connection, job_id: UUID) -> dict | None:
-    return conn.execute("SELECT * FROM jobs WHERE id = %(id)s", {"id": job_id}).fetchone()
+    return conn.execute(
+        "SELECT * FROM jobs WHERE id = %(id)s", {"id": job_id}
+    ).fetchone()
 
 
 def list_logs(conn: Connection, job_id: UUID) -> list[dict]:
@@ -80,7 +95,9 @@ def select_due_pending(conn: Connection) -> list[dict]:
     ).fetchall()
 
 
-def claim_job(conn: Connection, job_id: UUID, worker_id: str, lease_seconds: float) -> dict | None:
+def claim_job(
+    conn: Connection, job_id: UUID, worker_id: str, lease_seconds: float
+) -> dict | None:
     """Atomically move one pending job to processing for this worker.
 
     Returns None when the job is not claimable (cancelled, already claimed, or
@@ -112,7 +129,9 @@ def claim_job(conn: Connection, job_id: UUID, worker_id: str, lease_seconds: flo
     return job
 
 
-def complete_job(conn: Connection, job_id: UUID, worker_id: str, attempt: int, result: dict) -> int:
+def complete_job(
+    conn: Connection, job_id: UUID, worker_id: str, attempt: int, result: dict
+) -> int:
     """Fenced completion. Returns the rowcount: 0 means this worker no longer owns the job."""
     with conn.transaction():
         rows = conn.execute(
@@ -124,7 +143,12 @@ def complete_job(conn: Connection, job_id: UUID, worker_id: str, attempt: int, r
             WHERE id = %(id)s AND status = 'processing'
               AND locked_by = %(worker)s AND attempts = %(attempt)s
             """,
-            {"id": job_id, "worker": worker_id, "attempt": attempt, "result": Jsonb(result)},
+            {
+                "id": job_id,
+                "worker": worker_id,
+                "attempt": attempt,
+                "result": Jsonb(result),
+            },
         ).rowcount
         if rows:
             _add_log(conn, job_id, "info", "job completed", {"attempt": attempt})
@@ -174,7 +198,13 @@ def fail_job(
         ).fetchone()
         if row is None:
             return None
-        _add_log(conn, job_id, "warning", "attempt failed", {"attempt": attempt, "error": error})
+        _add_log(
+            conn,
+            job_id,
+            "warning",
+            "attempt failed",
+            {"attempt": attempt, "error": error},
+        )
         if row["status"] == "pending":
             _add_log(
                 conn,
@@ -184,5 +214,11 @@ def fail_job(
                 {"attempt": attempt, "delay_seconds": delay_seconds},
             )
         else:
-            _add_log(conn, job_id, "error", "job permanently failed", {"attempt": attempt, "error": error})
+            _add_log(
+                conn,
+                job_id,
+                "error",
+                "job permanently failed",
+                {"attempt": attempt, "error": error},
+            )
     return row["status"]

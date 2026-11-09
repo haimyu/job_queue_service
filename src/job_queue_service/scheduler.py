@@ -33,7 +33,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
     logger.info("scheduler started")
-    with psycopg.connect(settings.database_url, autocommit=True, row_factory=dict_row) as conn:
+    with psycopg.connect(
+        settings.database_url, autocommit=True, row_factory=dict_row
+    ) as conn:
         while not stop.is_set():
             relay_due_pending(conn, r)
             stop.wait(settings.relay_interval_seconds)

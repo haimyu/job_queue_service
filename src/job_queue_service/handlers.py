@@ -37,24 +37,32 @@ def _work(low: float, high: float, settings: Settings) -> None:
     time.sleep(random.uniform(low, high) * settings.job_sleep_scale)
 
 
-def run_email(payload: EmailPayload, report_progress: Callable[[int], None], settings: Settings):
+def run_email(
+    payload: EmailPayload, report_progress: Callable[[int], None], settings: Settings
+):
     _work(1, 3, settings)
     return {"message_id": str(uuid.uuid7())}
 
 
-def run_webhook(payload: WebhookPayload, report_progress: Callable[[int], None], settings: Settings):
+def run_webhook(
+    payload: WebhookPayload, report_progress: Callable[[int], None], settings: Settings
+):
     _work(1, 2, settings)
     if random.random() < settings.webhook_failure_rate:
         raise RetryableJobError("simulated webhook failure")
     return {"status_code": 200}
 
 
-def run_report(payload: ReportPayload, report_progress: Callable[[int], None], settings: Settings):
+def run_report(
+    payload: ReportPayload, report_progress: Callable[[int], None], settings: Settings
+):
     _work(3, 5, settings)
     return {"file_url": f"https://files.example.com/reports/{uuid.uuid7()}.pdf"}
 
 
-def run_batch(payload: BatchPayload, report_progress: Callable[[int], None], settings: Settings):
+def run_batch(
+    payload: BatchPayload, report_progress: Callable[[int], None], settings: Settings
+):
     total = len(payload.items)
     for done in range(1, total + 1):
         _work(0.1, 0.3, settings)
@@ -71,7 +79,10 @@ HANDLERS = {
 
 
 def run_handler(
-    job_type: str, payload: dict, report_progress: Callable[[int], None], settings: Settings
+    job_type: str,
+    payload: dict,
+    report_progress: Callable[[int], None],
+    settings: Settings,
 ) -> dict:
     """Validate the stored payload, then run the handler for the job type."""
     try:
