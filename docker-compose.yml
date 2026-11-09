@@ -1,0 +1,63 @@
+x-app: &app
+  build: .
+  image: job-queue:dev
+  restart: unless-stopped
+  # Passes every setting in .env to the container. Values under environment: win over env_file,
+  # so DATABASE_URL and REDIS_URL below always point at the compose services.
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    REDIS_URL: redis://redis:6379/0
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  api:
+    <<: *app
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "job_queue_service.worker"]
+    # Time between SIGTERM and SIGKILL; must exceed your longest job
+    stop_grace_period: 30s
+
+  scheduler:
+    <<: *app
+    command: ["python", "-m", "job_queue_service.scheduler"]
+
+  postgres:
+    image: postgres:17
+    env_file: .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs only on an empty volume. After a schema change use `docker compose down -v`.
+      - ./db:/docker-entrypoint-initdb.d:ro,z
+    healthcheck:
+      # $$ = expanded by the container's shell, not by compose
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7
+    # Redis is only a wake-up signal; Postgres is the source of truth.
+    # Losing Redis contents must be harmless, so no persistence.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
