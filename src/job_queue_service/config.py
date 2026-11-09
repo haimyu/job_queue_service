@@ -18,6 +18,8 @@ class Settings:
     lease_seconds: float = 30
     pop_timeout_seconds: float = 2
     relay_interval_seconds: float = 1
+    idempotency_cleanup_seconds: float = 300
+    idempotency_ttl_hours: int = 24
     job_sleep_scale: float = 1.0
     webhook_failure_rate: float = 0.2
     # Delay before attempt 2, attempt 3, and so on. See the worker for how it is indexed.
@@ -77,6 +79,12 @@ def load_settings() -> Settings:
         ),
         relay_interval_seconds=_optional(
             "RELAY_INTERVAL_SECONDS", base.relay_interval_seconds, float
+        ),
+        idempotency_cleanup_seconds=_optional(
+            "IDEMPOTENCY_CLEANUP_SECONDS", base.idempotency_cleanup_seconds, float
+        ),
+        idempotency_ttl_hours=_optional(
+            "IDEMPOTENCY_TTL_HOURS", base.idempotency_ttl_hours, int
         ),
         job_sleep_scale=_optional("JOB_SLEEP_SCALE", base.job_sleep_scale, float),
         webhook_failure_rate=_optional(

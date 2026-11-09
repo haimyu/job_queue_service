@@ -1,4 +1,4 @@
-"""Scheduler: periodically copies due pending jobs from Postgres into the Redis queue."""
+"""Scheduler: promotes due scheduled jobs, relays due pending jobs to Redis, expires old keys."""
 
 import logging
 import signal
@@ -22,6 +22,14 @@ def relay_due_pending(conn: psycopg.Connection, r: redis.Redis) -> int:
     return len(due)
 
 
+def run_relay_cycle(conn: psycopg.Connection, r: redis.Redis) -> int:
+    """Promote scheduled jobs that are due, then relay all due pending jobs. Returns the relay count."""
+    promoted = db.promote_scheduled(conn)
+    if promoted:
+        logger.info("promoted %d scheduled jobs to pending", len(promoted))
+    return relay_due_pending(conn, r)
+
+
 def main() -> None:
     settings = load_settings()
     setup_logging(settings.log_level)
@@ -32,12 +40,20 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
+    # The slower duties run every N relay cycles. Counting cycles means the scheduler never
+    # has to read the clock itself, and a missed cycle only delays cleanup, which is harmless.
+    cleanup_every = max(1, round(settings.idempotency_cleanup_seconds / settings.relay_interval_seconds))
+
     logger.info("scheduler started")
-    with psycopg.connect(
-        settings.database_url, autocommit=True, row_factory=dict_row
-    ) as conn:
+    with psycopg.connect(settings.database_url, autocommit=True, row_factory=dict_row) as conn:
+        cycle = 0
         while not stop.is_set():
-            relay_due_pending(conn, r)
+            run_relay_cycle(conn, r)
+            if cycle % cleanup_every == 0:
+                expired = db.expire_idempotency_keys(conn, settings.idempotency_ttl_hours)
+                if expired:
+                    logger.info("expired %d idempotency keys", expired)
+            cycle += 1
             stop.wait(settings.relay_interval_seconds)
 
 

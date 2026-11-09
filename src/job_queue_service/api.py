@@ -3,42 +3,89 @@
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from typing import Annotated
 from uuid import UUID
 
 import psycopg
 import redis
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, Response
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from job_queue_service import db, redis_client
 from job_queue_service.config import Settings, load_settings
 from job_queue_service.logging_setup import setup_logging
-from job_queue_service.models import JobCreate
+from job_queue_service.models import JobCreate, JobStatus, JobType
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def enqueue_best_effort(request: Request, job: dict) -> None:
+    """Fast path: put a due pending job in the Redis queue right after its transaction commits."""
+    if job["status"] != "pending":
+        return
+    try:
+        redis_client.enqueue(request.app.state.redis, [job])
+    except redis.RedisError:
+        # The scheduler relay re-adds every due pending job within about a second.
+        logger.warning(
+            "could not enqueue in redis, relay will recover it", extra={"job_id": job["id"]}
+        )
+
+
 @router.post("/jobs", status_code=201)
-def create_job(body: JobCreate, request: Request) -> dict:
+def create_job(
+    body: JobCreate,
+    request: Request,
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
+) -> dict:
     job_id = uuid.uuid7()
     # Leaving this block commits the insert. Postgres is the source of truth,
     # so the job is durable before Redis hears about it.
     with request.app.state.pool.connection() as conn:
-        job = db.insert_job(
-            conn, job_id, body.type, body.payload, body.priority, body.max_attempts
-        )
-    try:
-        redis_client.enqueue(request.app.state.redis, [job])
-    except redis.RedisError:
-        # Fast path only. The scheduler relay re-adds every due pending job within about a second.
-        logger.warning(
-            "could not enqueue in redis, relay will recover it",
-            extra={"job_id": job_id},
-        )
+        # A second pass happens only if the key expired between the insert and the select.
+        for _ in range(2):
+            job = db.insert_job(
+                conn,
+                job_id,
+                body.type,
+                body.payload,
+                body.priority,
+                body.max_attempts,
+                body.run_at,
+                idempotency_key,
+            )
+            if job is not None:
+                break
+            found = db.get_job_by_idempotency_key(conn, idempotency_key, body.type, body.payload)
+            if found is None:
+                continue
+            existing, same_request = found
+            if not same_request:
+                raise HTTPException(
+                    status_code=422, detail="idempotency key reused with a different request"
+                )
+            response.status_code = 200
+            return existing
+        else:
+            raise RuntimeError("idempotency key kept conflicting without a visible job")
+    enqueue_best_effort(request, job)
     logger.info("job created", extra={"job_id": job_id, "job_type": body.type})
     return job
+
+
+@router.get("/jobs")
+def list_jobs(
+    request: Request,
+    status: JobStatus | None = None,
+    job_type: Annotated[JobType | None, Query(alias="type")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[dict]:
+    with request.app.state.pool.connection() as conn:
+        return db.list_jobs(conn, status, job_type, limit, offset)
 
 
 @router.get("/jobs/{job_id}")
@@ -47,6 +94,39 @@ def get_job(job_id: UUID, request: Request) -> dict:
         job = db.get_job(conn, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: UUID, request: Request) -> dict:
+    with request.app.state.pool.connection() as conn:
+        job = db.cancel_job(conn, job_id)
+        if job is None:
+            current = db.get_job(conn, job_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail="job not found")
+            raise HTTPException(
+                status_code=409,
+                detail=f"cannot cancel a job that is {current['status']}",
+            )
+    logger.info("job cancelled", extra={"job_id": job_id, "job_type": job["type"]})
+    return job
+
+
+@router.post("/jobs/{job_id}/retry")
+def retry_job(job_id: UUID, request: Request) -> dict:
+    with request.app.state.pool.connection() as conn:
+        job = db.retry_job(conn, job_id)
+        if job is None:
+            current = db.get_job(conn, job_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail="job not found")
+            raise HTTPException(
+                status_code=409,
+                detail=f"only failed jobs can be retried, this job is {current['status']}",
+            )
+    enqueue_best_effort(request, job)
+    logger.info("job manually retried", extra={"job_id": job_id, "job_type": job["type"]})
     return job
 
 

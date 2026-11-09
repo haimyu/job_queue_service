@@ -2,7 +2,10 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, HttpUrl, model_validator
+from pydantic import AwareDatetime, BaseModel, EmailStr, Field, HttpUrl, model_validator
+
+JobType = Literal["email", "webhook", "report", "batch"]
+JobStatus = Literal["scheduled", "pending", "processing", "completed", "failed", "cancelled"]
 
 
 class EmailPayload(BaseModel):
@@ -34,8 +37,11 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
 
 
 class JobCreate(BaseModel):
-    type: Literal["email", "webhook", "report", "batch"]
+    type: JobType
     payload: dict
+    # Must carry a timezone, otherwise "10:00" would be ambiguous. Whether it is in the
+    # future is decided by Postgres now() at insert time, not by Python.
+    run_at: AwareDatetime | None = None
     priority: int = Field(default=0, ge=0, le=100)
     max_attempts: int = Field(default=3, ge=1, le=10)
 
