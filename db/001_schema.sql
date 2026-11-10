@@ -6,7 +6,7 @@ CREATE TABLE jobs (
                        ('scheduled','pending','processing','completed','failed','cancelled')),
     priority         integer NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 100),
     attempts         integer NOT NULL DEFAULT 0,
-    max_attempts     integer NOT NULL DEFAULT 3 CHECK (max_attempts >= 1),
+    max_attempts     integer NOT NULL DEFAULT 4 CHECK (max_attempts >= 1),
     available_at     timestamptz NOT NULL DEFAULT now(),
     locked_by        text,
     lease_expires_at timestamptz,

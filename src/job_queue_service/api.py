@@ -92,6 +92,19 @@ def list_jobs(
         return db.list_jobs(conn, status, job_type, limit, offset)
 
 
+@router.get("/dead-letter")
+def list_dead_letter(
+    request: Request,
+    job_type: Annotated[JobType | None, Query(alias="type")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[dict]:
+    """The dead letter queue is the set of failed jobs: they used all their attempts or hit a
+    permanent error. Each keeps its last error. Retry one with POST /jobs/{id}/retry."""
+    with request.app.state.pool.connection() as conn:
+        return db.list_jobs(conn, "failed", job_type, limit, offset)
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: UUID, request: Request) -> dict:
     with request.app.state.pool.connection() as conn:

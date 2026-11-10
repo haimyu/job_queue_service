@@ -19,7 +19,7 @@ def test_missing_required_variable_fails_and_names_it(env, name):
 
 def test_defaults_apply_when_only_required_variables_are_set(env):
     settings = load_settings()
-    assert settings.backoff_seconds == (30, 120)
+    assert settings.backoff_seconds == (0.1, 30, 120)
     assert settings.job_timeouts == {"email": 10, "webhook": 10, "report": 15}
     assert settings.lease_seconds == 30
 

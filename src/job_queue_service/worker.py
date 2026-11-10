@@ -389,13 +389,6 @@ class Worker:
         record_failure(self.conn, self.settings, job, self.worker_id, error, context)
 
 
-def process_next(
-    conn: psycopg.Connection, r: redis.Redis, settings: Settings, worker_id: str
-) -> UUID | None:
-    """Run one iteration on connections the caller supplies. Used by tests."""
-    return Worker(settings, worker_id, conn, r).process_next()
-
-
 def main() -> None:
     settings = load_settings()
     setup_logging(settings.log_level)

@@ -13,4 +13,4 @@ wheels/
 *.pyc
 .pytest_cache
 .ruff_cache
-
+scripts

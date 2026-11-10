@@ -9,9 +9,10 @@ from uuid import uuid7
 
 import psycopg
 import pytest
+from conftest import process_next
 from psycopg.rows import dict_row
 
-from job_queue_service import db, handlers, redis_client, scheduler, worker
+from job_queue_service import db, handlers, redis_client, scheduler
 from job_queue_service.redis_client import QUEUE_READY
 from job_queue_service.worker import Worker
 
@@ -424,7 +425,7 @@ def test_popped_job_is_not_claimed_once_shutdown_is_requested(conn, r, make_work
 def test_health_reports_counts_queue_size_and_live_workers(client, conn, r, settings):
     email = {"type": "email", "payload": PAYLOADS["email"]}
     client.post("/jobs", json=email)
-    worker.process_next(conn, r, settings, "w1")  # one completed job
+    process_next(conn, r, settings, "w1")  # one completed job
     client.post("/jobs", json=email)  # one pending job
     cancelled = client.post("/jobs", json=email).json()["id"]
     client.post(

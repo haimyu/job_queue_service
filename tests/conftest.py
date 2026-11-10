@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -18,6 +19,7 @@ from psycopg.rows import dict_row
 
 from job_queue_service.api import create_app
 from job_queue_service.config import Settings
+from job_queue_service.worker import Worker
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -188,3 +190,10 @@ def freezable_proxy(settings: Settings):
     )
     yield proxy
     proxy.close()
+
+
+def process_next(
+    conn: psycopg.Connection, r: redis.Redis, settings: Settings, worker_id: str
+) -> UUID | None:
+    """Run one iteration on connections the caller supplies. Used by tests."""
+    return Worker(settings, worker_id, conn, r).process_next()

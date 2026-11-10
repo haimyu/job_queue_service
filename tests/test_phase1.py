@@ -1,6 +1,8 @@
 import uuid
 
-from job_queue_service import db, scheduler, worker
+from conftest import process_next
+
+from job_queue_service import db, scheduler
 from job_queue_service.redis_client import QUEUE_READY
 
 EMAIL = {
@@ -40,7 +42,7 @@ def test_invalid_payload_is_422(client):
 def test_worker_completes_job_end_to_end(client, conn, r, settings):
     job_id = client.post("/jobs", json=EMAIL).json()["id"]
 
-    processed = worker.process_next(conn, r, settings, "worker-1")
+    processed = process_next(conn, r, settings, "worker-1")
 
     assert str(processed) == job_id
     job = client.get(f"/jobs/{job_id}").json()

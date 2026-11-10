@@ -25,8 +25,8 @@ class Settings:
     idempotency_ttl_hours: int = 24
     job_sleep_scale: float = 1.0
     webhook_failure_rate: float = 0.2
-    # Delay before attempt 2, attempt 3, and so on. See the worker for how it is indexed.
-    backoff_seconds: tuple[float, ...] = (30, 120)
+    # Delay before attempt 3, attempt 4, and so on. See the worker for how it is indexed.
+    backoff_seconds: tuple[float, ...] = (0.1, 30, 120)
     # Maximum run time per job type. A type without an entry (batch) has no timeout and is
     # watched for stalls instead.
     job_timeouts: dict[str, float] = field(

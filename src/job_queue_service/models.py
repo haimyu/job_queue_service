@@ -45,7 +45,7 @@ class JobCreate(BaseModel):
     # future is decided by Postgres now() at insert time, not by Python.
     run_at: AwareDatetime | None = None
     priority: int = Field(default=0, ge=0, le=100)
-    max_attempts: int = Field(default=3, ge=1, le=10)
+    max_attempts: int = Field(default=4, ge=1, le=10)
 
     @model_validator(mode="after")
     def payload_matches_type(self) -> JobCreate:

@@ -4,8 +4,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from conftest import process_next
 
-from job_queue_service import db, redis_client, scheduler, worker
+from job_queue_service import db, redis_client, scheduler
 from job_queue_service.redis_client import QUEUE_READY
 
 EMAIL = {
@@ -59,7 +60,7 @@ def test_future_run_at_creates_scheduled_job_that_is_not_queued_or_claimable(
     assert db.claim_job(conn, job["id"], "w1", settings.lease_seconds) is None
     # Even a stale id forced into Redis cannot start the job early.
     r.zadd(QUEUE_READY, {job["id"]: 0})
-    assert worker.process_next(conn, r, settings, "w1") is None
+    assert process_next(conn, r, settings, "w1") is None
     assert db.get_job(conn, job["id"])["status"] == "scheduled"
 
 
@@ -73,7 +74,7 @@ def test_scheduler_promotes_due_scheduled_job_and_worker_runs_it(
     assert scheduler.run_relay_cycle(conn, r) == 1
 
     assert db.get_job(conn, job_id)["status"] == "pending"
-    worker.process_next(conn, r, settings, "w1")
+    process_next(conn, r, settings, "w1")
     assert db.get_job(conn, job_id)["status"] == "completed"
 
 
@@ -105,7 +106,7 @@ def test_cancel_pending_job_and_worker_skips_the_stale_queue_entry(
     assert response.json()["completed_at"] is not None
     # The id is still in Redis, and the conditional claim rejects it.
     assert r.zscore(QUEUE_READY, job_id) is not None
-    assert worker.process_next(conn, r, settings, "w1") is None
+    assert process_next(conn, r, settings, "w1") is None
     job = db.get_job(conn, job_id)
     assert job["status"] == "cancelled"
     assert job["attempts"] == 0
@@ -120,7 +121,7 @@ def test_cancel_scheduled_job(client):
 
 def test_cancel_completed_job_is_409_with_current_status(client, conn, r, settings):
     job_id = submit(client, EMAIL).json()["id"]
-    worker.process_next(conn, r, settings, "w1")
+    process_next(conn, r, settings, "w1")
 
     response = client.post(f"/jobs/{job_id}/cancel")
 
@@ -148,7 +149,7 @@ def test_cancel_unknown_job_is_404(client):
 def make_failed_job(client, conn, r, settings) -> str:
     s = replace(settings, webhook_failure_rate=1.0)
     job_id = submit(client, {**WEBHOOK, "max_attempts": 1}).json()["id"]
-    worker.process_next(conn, r, s, "w1")
+    process_next(conn, r, s, "w1")
     assert db.get_job(conn, job_id)["status"] == "failed"
     return job_id
 
@@ -173,8 +174,29 @@ def test_manual_retry_resets_a_failed_job_and_it_can_complete(
     assert last_log["message"] == "job manually retried"
     assert "simulated webhook failure" in last_log["metadata"]["previous_error"]
 
-    worker.process_next(conn, r, replace(settings, webhook_failure_rate=0.0), "w1")
+    process_next(conn, r, replace(settings, webhook_failure_rate=0.0), "w1")
     assert db.get_job(conn, job_id)["status"] == "completed"
+
+
+def test_dead_letter_lists_only_failed_jobs_with_their_error(client, conn, r, settings):
+    dead = make_failed_job(client, conn, r, settings)
+    submit(client, EMAIL)  # still pending, so not dead
+    r.flushdb()
+
+    listed = client.get("/dead-letter").json()
+
+    assert [job["id"] for job in listed] == [dead]
+    assert "simulated webhook failure" in listed[0]["error"]
+    assert client.get("/dead-letter?type=email").json() == []
+    assert client.get("/dead-letter?limit=0").status_code == 422
+
+
+def test_a_manually_retried_job_leaves_the_dead_letter_list(client, conn, r, settings):
+    dead = make_failed_job(client, conn, r, settings)
+
+    client.post(f"/jobs/{dead}/retry")
+
+    assert client.get("/dead-letter").json() == []
 
 
 @pytest.mark.parametrize("final_state", ["pending", "completed", "cancelled"])
@@ -183,7 +205,7 @@ def test_manual_retry_is_only_allowed_from_failed(
 ):
     job_id = submit(client, EMAIL).json()["id"]
     if final_state == "completed":
-        worker.process_next(conn, r, settings, "w1")
+        process_next(conn, r, settings, "w1")
     elif final_state == "cancelled":
         client.post(f"/jobs/{job_id}/cancel")
 

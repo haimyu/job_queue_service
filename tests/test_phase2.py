@@ -2,8 +2,9 @@ from dataclasses import replace
 from uuid import uuid7
 
 import pytest
+from conftest import process_next
 
-from job_queue_service import db, handlers, redis_client, scheduler, worker
+from job_queue_service import db, handlers, redis_client, scheduler
 from job_queue_service.redis_client import QUEUE_READY
 
 EMAIL = {
@@ -28,7 +29,7 @@ def test_every_job_type_completes(client, conn, r, settings, body):
     s = replace(settings, webhook_failure_rate=0.0)
     job_id = submit(client, body)
 
-    worker.process_next(conn, r, s, "w1")
+    process_next(conn, r, s, "w1")
 
     job = db.get_job(conn, job_id)
     assert job["status"] == "completed"
@@ -48,10 +49,13 @@ def test_batch_reports_progress_after_each_item(settings):
 
 
 def test_failed_attempt_schedules_retry_after_first_backoff(client, conn, r, settings):
-    s = replace(settings, webhook_failure_rate=1.0)
+    # The default first delay (0.1 s) is too short to assert "not yet due", so use a long one.
+    s = replace(
+        settings, webhook_failure_rate=1.0, backoff_seconds=(30.0, 120.0, 120.0)
+    )
     job_id = submit(client, WEBHOOK)
 
-    worker.process_next(conn, r, s, "w1")
+    process_next(conn, r, s, "w1")
 
     job = db.get_job(conn, job_id)
     assert job["status"] == "pending"
@@ -72,22 +76,23 @@ def test_failed_attempt_schedules_retry_after_first_backoff(client, conn, r, set
     ]
 
 
-def test_third_failure_fails_the_job(client, conn, r, settings):
-    s = replace(settings, webhook_failure_rate=1.0, backoff_seconds=(0.0, 0.0))
+def test_fourth_failure_fails_the_job(client, conn, r, settings):
+    # The default is 4 attempts: the first run plus 3 retries.
+    s = replace(settings, webhook_failure_rate=1.0, backoff_seconds=(0.0, 0.0, 0.0))
     job_id = submit(client, WEBHOOK)
 
-    for _ in range(3):
+    for _ in range(4):
         # After a failure the id is no longer in Redis. The relay puts the due retry back.
         assert scheduler.relay_due_pending(conn, r) == 1
-        worker.process_next(conn, r, s, "w1")
+        process_next(conn, r, s, "w1")
 
     job = db.get_job(conn, job_id)
     assert job["status"] == "failed"
-    assert job["attempts"] == 3
+    assert job["attempts"] == 4
     assert job["completed_at"] is not None
     assert scheduler.relay_due_pending(conn, r) == 0
     messages = log_messages(client, job_id)
-    assert messages.count("retry scheduled") == 2
+    assert messages.count("retry scheduled") == 3
     assert messages[-1] == "job permanently failed"
 
 
@@ -96,7 +101,7 @@ def test_permanent_error_fails_after_one_attempt(conn, r, settings):
     job = db.insert_job(conn, uuid7(), "webhook", {"body": {}}, 0, 3)
     redis_client.enqueue(r, [job])
 
-    worker.process_next(conn, r, settings, "w1")
+    process_next(conn, r, settings, "w1")
 
     job = db.get_job(conn, job["id"])
     assert job["status"] == "failed"
@@ -113,7 +118,7 @@ def test_unexpected_exception_is_retried_and_does_not_kill_the_worker(
     monkeypatch.setitem(handlers.HANDLERS, "email", explode)
     job_id = submit(client, EMAIL)
 
-    processed = worker.process_next(conn, r, settings, "w1")
+    processed = process_next(conn, r, settings, "w1")
 
     assert str(processed) == job_id
     job = db.get_job(conn, job_id)
@@ -126,11 +131,11 @@ def test_more_attempts_than_backoff_delays_reuses_the_last_delay(
 ):
     # One configured delay but three attempts: attempt 2 has no delay of its own.
     s = replace(settings, webhook_failure_rate=1.0, backoff_seconds=(0.0,))
-    job_id = submit(client, WEBHOOK)
+    job_id = submit(client, {**WEBHOOK, "max_attempts": 3})
 
     for _ in range(3):
         scheduler.relay_due_pending(conn, r)
-        worker.process_next(conn, r, s, "w1")
+        process_next(conn, r, s, "w1")
 
     job = db.get_job(conn, job_id)
     assert job["status"] == "failed"
@@ -154,7 +159,7 @@ def test_invalid_payload_is_rejected_with_422(client, body):
 
 def test_logs_endpoint_lists_transitions_oldest_first(client, conn, r, settings):
     job_id = submit(client, EMAIL)
-    worker.process_next(conn, r, settings, "w1")
+    process_next(conn, r, settings, "w1")
 
     logs = client.get(f"/jobs/{job_id}/logs").json()
 
@@ -172,7 +177,7 @@ def test_logs_of_unknown_job_is_404(client):
 
 def test_worker_skips_invalid_and_stale_queue_entries(conn, r, settings):
     r.zadd(QUEUE_READY, {"not-a-uuid": 0})
-    assert worker.process_next(conn, r, settings, "w1") is None
+    assert process_next(conn, r, settings, "w1") is None
 
     r.zadd(QUEUE_READY, {str(uuid7()): 0})  # a valid id with no job row
-    assert worker.process_next(conn, r, settings, "w1") is None
+    assert process_next(conn, r, settings, "w1") is None

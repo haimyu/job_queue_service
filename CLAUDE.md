@@ -102,7 +102,7 @@ CREATE TABLE jobs (
                        ('scheduled','pending','processing','completed','failed','cancelled')),
     priority         integer NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 100),
     attempts         integer NOT NULL DEFAULT 0,
-    max_attempts     integer NOT NULL DEFAULT 3 CHECK (max_attempts >= 1),
+    max_attempts     integer NOT NULL DEFAULT 4 CHECK (max_attempts >= 1),
     available_at     timestamptz NOT NULL DEFAULT now(),
     locked_by        text,
     lease_expires_at timestamptz,
@@ -280,8 +280,9 @@ Keys therefore live at least 24 h (24 h + cleanup interval at most).
 ## 6. Behaviour
 
 **Retries / backoff.** `attempts` is incremented only at claim. On failure, delay is
-`BACKOFF_SECONDS[attempts - 1]` with `BACKOFF_SECONDS = [30, 120]`.
-Run 1 immediate → run 2 after 30 s → run 3 after 120 s → then `failed`.
+`BACKOFF_SECONDS[attempts - 1]` with `BACKOFF_SECONDS = [0.1, 30, 120]`.
+Run 1 immediate → run 2 after 0.1 s → run 3 after 30 s → run 4 after 120 s → then `failed`
+(the first run plus 3 retries; `max_attempts` defaults to 4).
 
 **Error types** (in `handlers.py`):
 - `RetryableJobError` — transient (network, timeout, simulated webhook failure).
@@ -358,11 +359,12 @@ includes `job_id`, `job_type`, `attempt`, `worker_id` where known.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/jobs` | body: `type`, `payload`, `priority` (0–100, default 0), `run_at` (optional ISO datetime; future ⇒ `scheduled`), `max_attempts` (1–10, default 3). Optional header `Idempotency-Key`. 201 new / 200 existing / 422 mismatch or invalid |
+| POST | `/jobs` | body: `type`, `payload`, `priority` (0–100, default 0), `run_at` (optional ISO datetime; future ⇒ `scheduled`), `max_attempts` (1–10, default 4). Optional header `Idempotency-Key`. 201 new / 200 existing / 422 mismatch or invalid |
 | GET | `/jobs/{id}` | full job incl. status, result, error, progress, attempts. 404 if missing |
 | GET | `/jobs` | filters `status`, `type`; `limit` (default 50, max 200), `offset`; newest first. Filters composed with `psycopg.sql`, whitelisted |
 | POST | `/jobs/{id}/cancel` | 200 / 404 / 409 |
 | POST | `/jobs/{id}/retry` | only from `failed`; 200 / 404 / 409 |
+| GET | `/dead-letter` | the dead letter queue: jobs with status `failed` (attempts used up or permanent error), newest first; filter `type`; `limit`, `offset` as `/jobs`. There is no separate store: `failed` is the dead state, `POST /jobs/{id}/retry` replays it |
 | GET | `/jobs/{id}/logs` | job_logs for the job, oldest first |
 | GET | `/health` | Postgres ok, Redis ok, counts per status, oldest due pending age (s), `queue:ready` size (ZCARD), live workers (count of `worker:*` keys). 503 if Postgres down |
 
@@ -376,7 +378,7 @@ Use sync endpoints (`def`) and a `psycopg_pool.ConnectionPool` opened in the Fas
 ```
 DATABASE_URL, REDIS_URL
 LEASE_SECONDS=30            HEARTBEAT_SECONDS=10       POP_TIMEOUT_SECONDS=2
-STALL_SECONDS=60            BACKOFF_SECONDS=30,120     JOB_TIMEOUTS=email:10,webhook:10,report:15
+STALL_SECONDS=60            BACKOFF_SECONDS=0.1,30,120 JOB_TIMEOUTS=email:10,webhook:10,report:15
 RELAY_INTERVAL_SECONDS=1    REAPER_INTERVAL_SECONDS=5  IDEMPOTENCY_CLEANUP_SECONDS=300
 IDEMPOTENCY_TTL_HOURS=24    JOB_SLEEP_SCALE=1.0        WEBHOOK_FAILURE_RATE=0.2
 LOG_LEVEL=INFO
@@ -436,8 +438,8 @@ Tests:
 - Webhook, report, batch handlers; error types; per-type payload validation.
 - Retryable/permanent failure statements; backoff via `available_at`; max attempts.
 - `job_logs` writes for every transition so far; `GET /jobs/{id}/logs`.
-- Tests: failure → retry scheduled with `available_at` ≈ now + 30 s (assert with a
-  tolerance from Postgres `now()`); third failure ⇒ `failed`; permanent error ⇒ `failed`
+- Tests: failure → retry scheduled with `available_at` ≈ now + the first backoff delay (assert with a
+  tolerance from Postgres `now()`); the last allowed attempt failing ⇒ `failed`; permanent error ⇒ `failed`
   after 1 attempt; batch completes with progress 100.
 
 ### Phase 3 — Priority, scheduling, cancel, retry, list, idempotency
