@@ -163,7 +163,10 @@ Each worker runs one job at a time, so 8 workers run 8 jobs at the same time.
 ## Stress test
 
 `scripts/stress.py` sends a burst of mixed jobs (including webhooks that fail and retry) to
-the running stack and prints a live view and a summary. For a fast run, put these lines in
+the running stack, cancels about 10% of them, adds scheduled jobs, and prints a live view, a
+queue-wait table per priority and a summary. It exits 1 if a check fails: it timed out, a job
+is stuck, the idempotency key created more than one job, a cancel and a claim both won (or
+neither), a scheduled job started early, or a job completed twice. For a fast run, put these lines in
 `.env` and run `docker compose up -d`:
 
 ```
