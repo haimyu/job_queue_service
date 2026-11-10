@@ -3,7 +3,7 @@
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, get_args
 from uuid import UUID
 
 import psycopg
@@ -30,7 +30,8 @@ def enqueue_best_effort(request: Request, job: dict) -> None:
     except redis.RedisError:
         # The scheduler relay re-adds every due pending job within about a second.
         logger.warning(
-            "could not enqueue in redis, relay will recover it", extra={"job_id": job["id"]}
+            "could not enqueue in redis, relay will recover it",
+            extra={"job_id": job["id"]},
         )
 
 
@@ -59,13 +60,16 @@ def create_job(
             )
             if job is not None:
                 break
-            found = db.get_job_by_idempotency_key(conn, idempotency_key, body.type, body.payload)
+            found = db.get_job_by_idempotency_key(
+                conn, idempotency_key, body.type, body.payload
+            )
             if found is None:
                 continue
             existing, same_request = found
             if not same_request:
                 raise HTTPException(
-                    status_code=422, detail="idempotency key reused with a different request"
+                    status_code=422,
+                    detail="idempotency key reused with a different request",
                 )
             response.status_code = 200
             return existing
@@ -126,7 +130,9 @@ def retry_job(job_id: UUID, request: Request) -> dict:
                 detail=f"only failed jobs can be retried, this job is {current['status']}",
             )
     enqueue_best_effort(request, job)
-    logger.info("job manually retried", extra={"job_id": job_id, "job_type": job["type"]})
+    logger.info(
+        "job manually retried", extra={"job_id": job_id, "job_type": job["type"]}
+    )
     return job
 
 
@@ -140,21 +146,32 @@ def get_job_logs(job_id: UUID, request: Request) -> list[dict]:
 
 @router.get("/health")
 def health(request: Request, response: Response) -> dict:
+    jobs = oldest_age = queue_ready = live_workers = None
     try:
         with request.app.state.pool.connection() as conn:
-            db.ping(conn)
+            counts = db.job_counts(conn)
+            oldest_age = db.oldest_due_pending_age(conn)
+        jobs = {status: counts.get(status, 0) for status in get_args(JobStatus)}
         postgres_ok = True
     except psycopg.Error:
         postgres_ok = False
     try:
-        request.app.state.redis.ping()
+        queue_ready = redis_client.queue_size(request.app.state.redis)
+        live_workers = redis_client.count_workers(request.app.state.redis)
         redis_ok = True
     except redis.RedisError:
         redis_ok = False
     # Redis being down is degraded but not fatal: Postgres still accepts and keeps jobs.
     if not postgres_ok:
         response.status_code = 503
-    return {"postgres": postgres_ok, "redis": redis_ok}
+    return {
+        "postgres": postgres_ok,
+        "redis": redis_ok,
+        "jobs": jobs,
+        "oldest_due_pending_age_seconds": oldest_age,
+        "queue_ready": queue_ready,
+        "live_workers": live_workers,
+    }
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

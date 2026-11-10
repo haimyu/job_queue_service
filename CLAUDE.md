@@ -55,7 +55,9 @@ Forbidden:
 - Celery, RQ, Dramatiq, arq, Huey, or any job library
 - `time.sleep()` as a retry/backoff mechanism
 - String formatting of SQL (f-strings, `%`, `.format`) — always pass parameters
-- Reading time from Python for any scheduling/lease decision — use Postgres `now()`
+- Reading time from Python for any job state decision (due, lease, backoff, expiry) — use
+  Postgres `now()`. `time.monotonic()` is allowed only to pace the scheduler's own loop and as
+  the worker's local stopwatch for heartbeat, timeout, stall and self-fence deadlines.
 - Storing authoritative job state in Redis
 - Check-then-insert for idempotency (must be `ON CONFLICT`)
 - Any write by a worker to a job row without the fencing condition (section 5)
@@ -125,6 +127,8 @@ CREATE INDEX jobs_status_created_idx ON jobs (status, created_at DESC);
 CREATE INDEX jobs_type_created_idx ON jobs (type, created_at DESC);
 -- idempotency (NULLs never conflict)
 CREATE UNIQUE INDEX jobs_idempotency_key_idx ON jobs (idempotency_key);
+-- idempotency cleanup: only jobs that still hold a key, oldest first
+CREATE INDEX jobs_idempotency_expiry_idx ON jobs (created_at) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE job_logs (
     id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -296,26 +300,49 @@ Handlers receive `(payload, report_progress)` where `report_progress(percent: in
 updates a value the worker's main thread reads.
 
 **Worker loop** (`worker.py`, one job at a time per process):
-1. Refresh `worker:<id>` (TTL 30 s). If shutdown requested ⇒ exit 0.
+1. Refresh `worker:<id>` (TTL 30 s). If shutdown requested ⇒ delete the key, exit 0.
 2. `BZPOPMIN queue:ready` with timeout `POP_TIMEOUT_SECONDS` (2). Nothing ⇒ loop.
-3. Claim. No row ⇒ log debug, loop.
-4. Start the handler in a daemon thread. Main thread loops on `thread.join(HEARTBEAT_SECONDS)`:
-   - finished ⇒ finalize (complete / retryable / permanent), loop to 1.
-   - still running ⇒ heartbeat. Rowcount 0 ⇒ ownership lost ⇒ log error, `os._exit(1)`.
-   - timeout exceeded, or batch progress unchanged for `STALL_SECONDS` ⇒
-     record a retryable failure (fenced), log, `os._exit(1)`.
+   An id that is not a valid UUID ⇒ log a warning, skip.
+3. If shutdown was requested, do **not** claim: the job stays `pending` and the relay
+   re-adds it. Otherwise claim. No row (stale id) ⇒ log info, loop.
+4. Start the handler in a daemon thread. The main thread does all Postgres/Redis work and
+   loops on `thread.join(wait)`, where `wait` is the time to the nearest deadline (next
+   heartbeat, timeout, stall check, self-fence), at most `HEARTBEAT_SECONDS`:
+   - finished ⇒ finalize (complete / retryable / permanent), loop to 1. Rowcount 0 on
+     finalize ⇒ log a warning, discard the result, **do not exit** (nothing is running).
+   - still running, heartbeat due ⇒ fenced heartbeat (also writes progress) and refresh
+     `worker:<id>`. Rowcount 0 ⇒ ownership lost while the handler still runs ⇒ log error,
+     `os._exit(1)`.
+   - heartbeat raises (connection error) ⇒ log, reconnect, retry at the next wake-up.
+     Track the last successful heartbeat (the claim counts as one, timed before the claim
+     statement). If none succeeded for `LEASE_SECONDS - HEARTBEAT_SECONDS`, log and
+     `os._exit(1)`: the worker must stop before its lease could expire, not after being told.
+     This check runs in a **dedicated watchdog thread** that never touches Postgres or Redis,
+     started before the handler and stopped when the handler ends. It cannot live in the main
+     thread: a frozen Postgres keeps the TCP connection open, so a heartbeat can block forever
+     without raising, and the check would only run after the database thawed.
+   - timeout exceeded, or progress unchanged for `STALL_SECONDS` (types without a timeout,
+     i.e. batch) ⇒ record a retryable failure (fenced), log, `os._exit(1)`.
      (Python cannot kill a thread; exiting the process kills the hung handler.
      Docker restarts the worker.)
 5. `worker_id` = `f"{hostname}-{pid}-{short random}"`.
-6. On Postgres/Redis connection errors: log, sleep 1 s, reconnect, continue.
+6. On Postgres/Redis connection errors in the loop: log, wait 1 s (interruptible by shutdown),
+   reconnect, continue.
+
+`LEASE_SECONDS` must be greater than `HEARTBEAT_SECONDS` (checked at startup).
 
 **Graceful shutdown:** SIGTERM/SIGINT set a flag. The worker stops popping, finishes and
-finalizes the current job, then exits 0. Compose `stop_grace_period: 30s` on worker.
+finalizes the current job, then exits 0. A worker as PID 1 in a container only receives
+SIGTERM if it installs a handler, so it must. Idle workers stop within one pop timeout.
+Compose `stop_grace_period: 30s` on worker.
 
 **Scheduler** (`scheduler.py`): single loop.
 - every `RELAY_INTERVAL_SECONDS` (1): promote scheduled → relay (ZADD due pending)
 - every `REAPER_INTERVAL_SECONDS` (5): reap expired leases
 - every `IDEMPOTENCY_CLEANUP_SECONDS` (300): expire idempotency keys
+Each duty has its own next-run time kept with `time.monotonic()`, and the loop waits for the
+earliest one. The clock only paces the loop. Whether a job is due or its lease expired is
+always decided by Postgres `now()` inside the SQL.
 Every operation is idempotent or uses SKIP LOCKED, so running 2 schedulers is safe.
 
 **job_logs entries:** created, claimed (with attempt + worker), completed, failed attempt

@@ -1,8 +1,9 @@
-"""Scheduler: promotes due scheduled jobs, relays due pending jobs to Redis, expires old keys."""
+"""Scheduler: promotes scheduled jobs, relays pending jobs to Redis, reaps dead leases, expires keys."""
 
 import logging
 import signal
 import threading
+import time
 
 import psycopg
 import redis
@@ -40,21 +41,37 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
-    # The slower duties run every N relay cycles. Counting cycles means the scheduler never
-    # has to read the clock itself, and a missed cycle only delays cleanup, which is harmless.
-    cleanup_every = max(1, round(settings.idempotency_cleanup_seconds / settings.relay_interval_seconds))
-
     logger.info("scheduler started")
-    with psycopg.connect(settings.database_url, autocommit=True, row_factory=dict_row) as conn:
-        cycle = 0
+    with psycopg.connect(
+        settings.database_url, autocommit=True, row_factory=dict_row
+    ) as conn:
+        # time.monotonic() only paces this loop: when each duty runs next. It never decides job
+        # state. Every "is this job due or expired" question is answered by Postgres now().
+        next_relay = next_reaper = next_cleanup = time.monotonic()
         while not stop.is_set():
-            run_relay_cycle(conn, r)
-            if cycle % cleanup_every == 0:
-                expired = db.expire_idempotency_keys(conn, settings.idempotency_ttl_hours)
+            now = time.monotonic()
+            if now >= next_relay:
+                run_relay_cycle(conn, r)
+                next_relay = now + settings.relay_interval_seconds
+            if now >= next_reaper:
+                for job in db.reap_expired_leases(conn):
+                    logger.warning(
+                        "lease expired, job reaped to %s",
+                        job["status"],
+                        extra={"job_id": job["id"]},
+                    )
+                next_reaper = now + settings.reaper_interval_seconds
+            if now >= next_cleanup:
+                expired = db.expire_idempotency_keys(
+                    conn, settings.idempotency_ttl_hours
+                )
                 if expired:
                     logger.info("expired %d idempotency keys", expired)
-            cycle += 1
-            stop.wait(settings.relay_interval_seconds)
+                next_cleanup = now + settings.idempotency_cleanup_seconds
+            # Sleep until the earliest duty is due. Event.wait returns early on SIGTERM.
+            stop.wait(
+                max(0.0, min(next_relay, next_reaper, next_cleanup) - time.monotonic())
+            )
 
 
 if __name__ == "__main__":

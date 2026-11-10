@@ -16,12 +16,12 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 
-def ping(conn: Connection) -> None:
-    conn.execute("SELECT 1")
-
-
 def _add_log(
-    conn: Connection, job_id: UUID, level: str, message: str, metadata: dict | None = None
+    conn: Connection,
+    job_id: UUID,
+    level: str,
+    message: str,
+    metadata: dict | None = None,
 ) -> None:
     conn.execute(
         """
@@ -273,9 +273,17 @@ def list_jobs(
     conditions = []
     for column, value in filters.items():
         if value is not None:
-            conditions.append(sql.SQL("{} = {}").format(sql.Identifier(column), sql.Placeholder(column)))
+            conditions.append(
+                sql.SQL("{} = {}").format(
+                    sql.Identifier(column), sql.Placeholder(column)
+                )
+            )
             params[column] = value
-    where = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(conditions) if conditions else sql.SQL("")
+    where = (
+        sql.SQL(" WHERE ") + sql.SQL(" AND ").join(conditions)
+        if conditions
+        else sql.SQL("")
+    )
     query = sql.SQL(
         "SELECT * FROM jobs{where} ORDER BY created_at DESC, id DESC LIMIT %(limit)s OFFSET %(offset)s"
     ).format(where=where)
@@ -318,7 +326,13 @@ def retry_job(conn: Connection, job_id: UUID) -> dict | None:
         ).fetchone()
         if job is None or job["status"] != "failed":
             return None
-        _add_log(conn, job_id, "info", "job manually retried", {"previous_error": job["error"]})
+        _add_log(
+            conn,
+            job_id,
+            "info",
+            "job manually retried",
+            {"previous_error": job["error"]},
+        )
         return conn.execute(
             """
             UPDATE jobs
@@ -342,3 +356,90 @@ def expire_idempotency_keys(conn: Connection, ttl_hours: int) -> int:
         """,
         {"ttl_hours": ttl_hours},
     ).rowcount
+
+
+def heartbeat_job(
+    conn: Connection,
+    job_id: UUID,
+    worker_id: str,
+    attempt: int,
+    progress: int,
+    lease_seconds: float,
+) -> int:
+    """Fenced heartbeat: extend the lease and store progress. Returns the rowcount.
+
+    0 means this worker no longer owns the job, for example because the lease expired
+    and the reaper gave the job back to the queue.
+    """
+    return conn.execute(
+        """
+        UPDATE jobs
+        SET lease_expires_at = now() + make_interval(secs => %(lease)s),
+            progress = %(progress)s, updated_at = now()
+        WHERE id = %(id)s AND status = 'processing'
+          AND locked_by = %(worker)s AND attempts = %(attempt)s
+        """,
+        {
+            "id": job_id,
+            "worker": worker_id,
+            "attempt": attempt,
+            "progress": progress,
+            "lease": lease_seconds,
+        },
+    ).rowcount
+
+
+def reap_expired_leases(conn: Connection) -> list[dict]:
+    """Return processing jobs with an expired lease to pending, or fail them if out of attempts.
+
+    FOR UPDATE SKIP LOCKED lets several schedulers reap at the same time without
+    touching the same row twice. At most 100 jobs are reaped per call.
+    """
+    with conn.transaction():
+        reaped = conn.execute(
+            """
+            UPDATE jobs
+            SET status       = CASE WHEN attempts < max_attempts THEN 'pending' ELSE 'failed' END,
+                available_at = now(),
+                completed_at = CASE WHEN attempts < max_attempts THEN NULL ELSE now() END,
+                error = 'lease expired: worker presumed dead',
+                locked_by = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id IN (
+                SELECT id FROM jobs
+                WHERE status = 'processing' AND lease_expires_at < now()
+                ORDER BY lease_expires_at
+                LIMIT 100
+                FOR UPDATE SKIP LOCKED
+            )
+            AND status = 'processing' AND lease_expires_at < now()
+            RETURNING id, status
+            """
+        ).fetchall()
+        for job in reaped:
+            level = "warning" if job["status"] == "pending" else "error"
+            _add_log(
+                conn,
+                job["id"],
+                level,
+                "lease expired, job reaped",
+                {"status": job["status"]},
+            )
+    return reaped
+
+
+def job_counts(conn: Connection) -> dict[str, int]:
+    """Number of jobs per status. Statuses with no jobs are missing from the result."""
+    rows = conn.execute(
+        "SELECT status, count(*) AS n FROM jobs GROUP BY status"
+    ).fetchall()
+    return {row["status"]: row["n"] for row in rows}
+
+
+def oldest_due_pending_age(conn: Connection) -> float:
+    """Seconds the longest-waiting due pending job has been due, or 0 when there is none."""
+    return conn.execute(
+        """
+        SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(available_at)), 0)::float8 AS age
+        FROM jobs WHERE status = 'pending' AND available_at <= now()
+        """
+    ).fetchone()["age"]

@@ -31,6 +31,8 @@ CREATE INDEX jobs_status_created_idx ON jobs (status, created_at DESC);
 CREATE INDEX jobs_type_created_idx ON jobs (type, created_at DESC);
 -- idempotency (NULLs never conflict)
 CREATE UNIQUE INDEX jobs_idempotency_key_idx ON jobs (idempotency_key);
+-- idempotency cleanup: only jobs that still hold a key, oldest first
+CREATE INDEX jobs_idempotency_expiry_idx ON jobs (created_at) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE job_logs (
     id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

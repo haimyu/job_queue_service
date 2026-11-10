@@ -5,7 +5,9 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, EmailStr, Field, HttpUrl, model_validator
 
 JobType = Literal["email", "webhook", "report", "batch"]
-JobStatus = Literal["scheduled", "pending", "processing", "completed", "failed", "cancelled"]
+JobStatus = Literal[
+    "scheduled", "pending", "processing", "completed", "failed", "cancelled"
+]
 
 
 class EmailPayload(BaseModel):

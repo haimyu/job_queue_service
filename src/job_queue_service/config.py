@@ -16,19 +16,32 @@ class Settings:
     database_url: str
     redis_url: str
     lease_seconds: float = 30
+    heartbeat_seconds: float = 10
     pop_timeout_seconds: float = 2
+    stall_seconds: float = 60
     relay_interval_seconds: float = 1
+    reaper_interval_seconds: float = 5
     idempotency_cleanup_seconds: float = 300
     idempotency_ttl_hours: int = 24
     job_sleep_scale: float = 1.0
     webhook_failure_rate: float = 0.2
     # Delay before attempt 2, attempt 3, and so on. See the worker for how it is indexed.
     backoff_seconds: tuple[float, ...] = (30, 120)
-    # Maximum run time per job type. Enforced by the worker in a later phase.
+    # Maximum run time per job type. A type without an entry (batch) has no timeout and is
+    # watched for stalls instead.
     job_timeouts: dict[str, float] = field(
         default_factory=lambda: {"email": 10, "webhook": 10, "report": 15}
     )
     log_level: str = "INFO"
+
+    def __post_init__(self) -> None:
+        # The worker must stop itself one heartbeat before its lease expires, so the lease has
+        # to be longer than the heartbeat interval.
+        if self.lease_seconds <= self.heartbeat_seconds:
+            raise ValueError(
+                f"LEASE_SECONDS ({self.lease_seconds:g}) must be greater than "
+                f"HEARTBEAT_SECONDS ({self.heartbeat_seconds:g})"
+            )
 
 
 def _parse_float_list(raw: str) -> tuple[float, ...]:
@@ -68,31 +81,43 @@ def _optional[T](name: str, default: T, parse: Callable[[str], T]) -> T:
 
 
 def load_settings() -> Settings:
-    base = Settings(
-        database_url=_required("DATABASE_URL"), redis_url=_required("REDIS_URL")
-    )
-    return replace(
-        base,
-        lease_seconds=_optional("LEASE_SECONDS", base.lease_seconds, float),
-        pop_timeout_seconds=_optional(
-            "POP_TIMEOUT_SECONDS", base.pop_timeout_seconds, float
+    defaults = Settings(database_url="", redis_url="")
+    values = {
+        "database_url": _required("DATABASE_URL"),
+        "redis_url": _required("REDIS_URL"),
+        "lease_seconds": _optional("LEASE_SECONDS", defaults.lease_seconds, float),
+        "heartbeat_seconds": _optional(
+            "HEARTBEAT_SECONDS", defaults.heartbeat_seconds, float
         ),
-        relay_interval_seconds=_optional(
-            "RELAY_INTERVAL_SECONDS", base.relay_interval_seconds, float
+        "pop_timeout_seconds": _optional(
+            "POP_TIMEOUT_SECONDS", defaults.pop_timeout_seconds, float
         ),
-        idempotency_cleanup_seconds=_optional(
-            "IDEMPOTENCY_CLEANUP_SECONDS", base.idempotency_cleanup_seconds, float
+        "stall_seconds": _optional("STALL_SECONDS", defaults.stall_seconds, float),
+        "relay_interval_seconds": _optional(
+            "RELAY_INTERVAL_SECONDS", defaults.relay_interval_seconds, float
         ),
-        idempotency_ttl_hours=_optional(
-            "IDEMPOTENCY_TTL_HOURS", base.idempotency_ttl_hours, int
+        "reaper_interval_seconds": _optional(
+            "REAPER_INTERVAL_SECONDS", defaults.reaper_interval_seconds, float
         ),
-        job_sleep_scale=_optional("JOB_SLEEP_SCALE", base.job_sleep_scale, float),
-        webhook_failure_rate=_optional(
-            "WEBHOOK_FAILURE_RATE", base.webhook_failure_rate, float
+        "idempotency_cleanup_seconds": _optional(
+            "IDEMPOTENCY_CLEANUP_SECONDS", defaults.idempotency_cleanup_seconds, float
         ),
-        backoff_seconds=_optional(
-            "BACKOFF_SECONDS", base.backoff_seconds, _parse_float_list
+        "idempotency_ttl_hours": _optional(
+            "IDEMPOTENCY_TTL_HOURS", defaults.idempotency_ttl_hours, int
         ),
-        job_timeouts=_optional("JOB_TIMEOUTS", base.job_timeouts, _parse_float_map),
-        log_level=_optional("LOG_LEVEL", base.log_level, str),
-    )
+        "job_sleep_scale": _optional(
+            "JOB_SLEEP_SCALE", defaults.job_sleep_scale, float
+        ),
+        "webhook_failure_rate": _optional(
+            "WEBHOOK_FAILURE_RATE", defaults.webhook_failure_rate, float
+        ),
+        "backoff_seconds": _optional(
+            "BACKOFF_SECONDS", defaults.backoff_seconds, _parse_float_list
+        ),
+        "job_timeouts": _optional(
+            "JOB_TIMEOUTS", defaults.job_timeouts, _parse_float_map
+        ),
+        "log_level": _optional("LOG_LEVEL", defaults.log_level, str),
+    }
+    # Settings.__post_init__ rejects inconsistent values, such as a lease shorter than a heartbeat.
+    return replace(defaults, **values)

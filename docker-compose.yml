@@ -25,6 +25,8 @@ services:
     command: ["python", "-m", "job_queue_service.worker"]
     # Time between SIGTERM and SIGKILL; must exceed your longest job
     stop_grace_period: 30s
+    deploy:
+      replicas: 3
 
   scheduler:
     <<: *app

@@ -3,6 +3,8 @@
 import redis
 
 QUEUE_READY = "queue:ready"
+WORKER_KEY_PREFIX = "worker:"
+WORKER_TTL_SECONDS = 30
 
 
 def connect(url: str) -> redis.Redis:
@@ -26,3 +28,21 @@ def pop_ready(r: redis.Redis, timeout: float) -> str | None:
         return None
     _key, job_id, _score = popped
     return job_id
+
+
+def refresh_worker(r: redis.Redis, worker_id: str) -> None:
+    """Mark a worker as alive. The key expires by itself if the worker stops refreshing it."""
+    r.set(f"{WORKER_KEY_PREFIX}{worker_id}", "1", ex=WORKER_TTL_SECONDS)
+
+
+def remove_worker(r: redis.Redis, worker_id: str) -> None:
+    r.delete(f"{WORKER_KEY_PREFIX}{worker_id}")
+
+
+def count_workers(r: redis.Redis) -> int:
+    # SCAN walks the keyspace in small steps. KEYS would block Redis while it ran.
+    return sum(1 for _ in r.scan_iter(match=f"{WORKER_KEY_PREFIX}*"))
+
+
+def queue_size(r: redis.Redis) -> int:
+    return r.zcard(QUEUE_READY)
