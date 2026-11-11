@@ -1,69 +1,57 @@
 # Job Queue Service
 
-A background job queue. Clients submit jobs over HTTP, separate worker processes run them,
-and PostgreSQL keeps the state of every job. Redis only passes job ids to the workers.
+Clients submit jobs over HTTP and separate worker processes run them. PostgreSQL holds the
+state of every job. Redis only passes job ids to the workers.
 
-Stack: Python 3.14, FastAPI, PostgreSQL 17 (psycopg 3, raw SQL), Redis 7, docker compose.
-
+Stack: Python 3.14, FastAPI, PostgreSQL 17 (psycopg 3, raw SQL), Redis 7, Docker Compose.
 The design reasons are in [DECISIONS.md](DECISIONS.md).
 
-## Run it
+## 1. Setup
 
 You need Docker with the compose plugin.
 
 ```bash
-cp .env.example .env
-```
-
-`.env.example` already holds working values (the `POSTGRES_` database credentials). The
-`.env` file is git-ignored.
-
-```bash
+cp .env.example .env               # working defaults; .env is git-ignored
 docker compose up -d --build       # api, 3 workers, scheduler, postgres, redis
 curl -s localhost:8000/health      # ready when "live_workers" is 3
 ```
 
-- API: http://localhost:8000
-- Interactive API docs (try every endpoint in the browser): http://localhost:8000/docs
+- API: http://localhost:8000. Interactive docs: http://localhost:8000/docs
 - Stop: `docker compose down`. Stop and delete the database: `docker compose down -v`.
-- The database schema is applied only when the database volume is empty. After changing
-  `db/001_schema.sql`, run `docker compose down -v`. The relay index `jobs_pending_due_idx`
-  changed (it is now `(priority DESC, available_at)`), so an existing database needs this.
+- The schema (`db/001_schema.sql`) is applied only when the database volume is empty.
+  After you change it, run `docker compose down -v`.
+- All settings are in `.env` (see `.env.example`). After you edit `.env`, run
+  `docker compose up -d` to apply the changes.
 
-### Logs
+## 2. Logs
 
-Every service writes JSON lines to stdout, one line per event, with the job id, type, attempt
-and worker id where known.
+Every service writes one JSON line per event, with the job id, type, attempt and worker id
+where known.
 
 ```bash
 docker compose logs -f worker
-docker compose logs | grep <job_id>      # follow one job through api, worker and scheduler
+docker compose logs | grep <job_id>    # follow one job across api, worker and scheduler
 ```
 
-## Run the tests
+## 3. Test
 
-The tests use the real PostgreSQL and Redis from compose. They use their own database
-(`jobs_test`) and Redis database 15, so they never touch your dev data.
+The tests use the compose PostgreSQL and Redis, but in their own database (`jobs_test`) and
+Redis database 15, so your dev data is never touched. They read the `POSTGRES_` values from
+`.env`.
 
 ```bash
 docker compose up -d postgres redis
-uv sync
-uv run pytest
-uv run ruff check
+uv run pytest       # about 25 s: some tests start, kill and stall real worker processes
+
 ```
 
-The tests read the `POSTGRES_` values from your `.env`. Some tests start real worker
-processes, kill them, and freeze the database connection, so the full run takes about 25 seconds.
+**Windows:** use the same commands. Three process-level shutdown tests are skipped. Windows has
+no inter-process SIGTERM: `Popen.send_signal(SIGTERM)` calls `TerminateProcess`, which is a hard
+kill, so graceful shutdown can't be tested there. The worker itself runs fine on Windows.
 
-**Windows:** run the same commands. Three process-level tests are skipped there:
-the 200-job test with 3 worker processes, the SIGTERM test and the idle-worker shutdown test.
-Windows has no inter-process SIGTERM (`Popen.send_signal(SIGTERM)` calls `TerminateProcess`,
-a hard kill with exit code 1), so graceful shutdown cannot be tested. The worker itself runs
-fine on Windows. The full suite (91 tests) runs on Linux and macOS.
-
-To run every test on any OS, use a Linux container. Start postgres and redis first, then run
-this from the project root (it needs host networking; on Docker Desktop turn on "Enable host
-networking"; with WSL 2 you can instead run the commands above inside WSL):
+To run all 91 tests on any OS, run them in a Linux container. This needs host networking: on
+Docker Desktop, turn on "Enable host networking". Alternatively, run the commands above inside
+WSL 2.
 
 ```bash
 docker compose up -d postgres redis
@@ -72,7 +60,44 @@ docker run --rm --network host -v "$PWD":/app:z -w /app \
   ghcr.io/astral-sh/uv:python3.14-bookworm-slim uv run pytest -p no:cacheprovider
 ```
 
-## Submit jobs
+## 4. Run it
+
+### Stress test
+
+`scripts/stress.py` sends a burst of mixed jobs to the running stack, including webhooks that
+fail and retry. It cancels about 10% of them, adds scheduled jobs, and prints a live view, the
+queue wait per priority and a summary.
+
+It exits 1 if any check fails:
+
+- it timed out
+- a job got stuck
+- one idempotency key created more than one job
+- a cancel and a claim both won, or neither did
+- a scheduled job started early
+- a job completed twice
+
+For a fast run, add these lines to `.env` and run `docker compose up -d`:
+
+```
+WEBHOOK_FAILURE_RATE=0.2
+JOB_SLEEP_SCALE=0.1
+BACKOFF_SECONDS=2,4,8
+```
+
+```bash
+uv run python scripts/stress.py --jobs 120
+```
+
+### Add workers
+
+Each worker runs one job at a time, so 8 workers run 8 jobs at once.
+
+```bash
+docker compose up -d --scale worker=8
+```
+
+### Submit jobs
 
 Every request returns the job. Save its `id`, then poll `GET /jobs/{id}` until `status` is
 `completed` or `failed`.
@@ -84,7 +109,7 @@ curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' -d '{
   "payload": {"to": "user@example.com", "subject": "Hello", "body": "Hi there"}
 }'
 
-# webhook (20% of attempts fail on purpose, see WEBHOOK_FAILURE_RATE)
+# webhook (WEBHOOK_FAILURE_RATE of attempts fail on purpose)
 curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' -d '{
   "type": "webhook",
   "payload": {"url": "https://example.com/hook", "body": {"event": "created"}}
@@ -103,21 +128,14 @@ curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-Optional fields on `POST /jobs`: `priority` (0 to 100, default 0, higher runs first),
-`max_attempts` (1 to 10, default 4: the first run plus 3 retries), `run_at` (an ISO datetime
-with a timezone; a future time makes the job `scheduled`), and the header `Idempotency-Key`.
+Optional fields on `POST /jobs`:
 
-```bash
-curl -s localhost:8000/jobs/<id>                # status, result, error, progress, attempts
-curl -s localhost:8000/jobs/<id>/logs           # every state change of the job
-curl -s 'localhost:8000/jobs?status=failed&type=webhook&limit=20'
-curl -s -X POST localhost:8000/jobs/<id>/cancel # only pending or scheduled jobs
-curl -s -X POST localhost:8000/jobs/<id>/retry  # only failed jobs
-curl -s localhost:8000/dead-letter              # the dead letter queue: failed jobs and their last error
-curl -s localhost:8000/health                   # counts per status, queue size, live workers
-```
-
-A high priority job, and a job with an idempotency key:
+- `priority`: 0 to 100, default 0. Higher runs first.
+- `max_attempts`: 1 to 10, default 4 (the first run plus 3 retries).
+- `run_at`: an ISO datetime with a timezone. A future time makes the job `scheduled`.
+- the `Idempotency-Key` header: sending the same key with the same type and payload returns
+  the same job (HTTP 200 instead of 201). The same key with a different type or payload
+  returns 422.
 
 ```bash
 curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' \
@@ -127,10 +145,19 @@ curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' \
 }'
 ```
 
-Sending the same key with the same type and payload again returns the same job (HTTP 200
-instead of 201). The same key with a different type or payload returns 422.
+Other endpoints:
 
-## Architecture
+```bash
+curl -s localhost:8000/jobs/<id>                # status, result, error, progress, attempts
+curl -s localhost:8000/jobs/<id>/logs           # every state change of the job
+curl -s 'localhost:8000/jobs?status=failed&type=webhook&limit=20'
+curl -s -X POST localhost:8000/jobs/<id>/cancel # pending or scheduled jobs only
+curl -s -X POST localhost:8000/jobs/<id>/retry  # failed jobs only
+curl -s localhost:8000/dead-letter              # failed jobs and their last error
+curl -s localhost:8000/health                   # counts per status, queue size, live workers
+```
+
+## 5. Architecture
 
 ```
   client ──HTTP──►  api (FastAPI)
@@ -154,61 +181,18 @@ instead of 201). The same key with a different type or payload returns 422.
                      that this worker still owns the job
 ```
 
-1. The API saves the job in PostgreSQL, then adds its id to Redis so a worker can start
-   it at once. If Redis is down, the API still answers success.
-2. A worker takes the highest priority id from Redis (`BZPOPMIN`) and claims the job with one
-   conditional `UPDATE`. Only one worker can win the claim.
-3. While the job runs, the worker extends its lease every 10 seconds (a heartbeat). Every
-   write by a worker checks that the worker still owns the job.
-4. The scheduler, every second, makes `scheduled` jobs `pending` when their time comes and
-   adds every due `pending` job to Redis again. Every 5 seconds it returns jobs with an
-   expired lease (a dead worker) to `pending`, or marks them `failed` if no attempts are left.
-5. If Redis loses its data, nothing is lost. The scheduler puts the jobs back within a second.
+1. **Submit.** The API commits the job to PostgreSQL, then adds its id to Redis. If Redis is
+   down, the API still returns success.
+2. **Claim.** A worker pops the highest-priority id (`BZPOPMIN`) and claims the job with one
+   conditional `UPDATE`. Only one worker can win.
+3. **Run.** The worker extends its lease every `HEARTBEAT_SECONDS`. Every write it makes
+   checks that it still owns the job.
+4. **Schedule and reap.** Every second, the scheduler makes due `scheduled` jobs `pending` and
+   re-adds every due `pending` job to Redis. Every 5 seconds, it returns jobs with an expired
+   lease (a dead worker) to `pending`, or to `failed` if no attempts are left.
+5. **Recover.** If Redis loses its data, nothing is lost: the scheduler re-adds the jobs
+   within a second.
 
 Job states: `scheduled` → `pending` → `processing` → `completed` or `failed`. A failed attempt
-goes back to `pending` with a delay. `cancelled` is reached from `pending` or `scheduled`.
-
-## Scale the workers
-
-The compose file starts 3 workers. Change the number with `--scale`:
-
-```bash
-docker compose up -d --scale worker=8
-```
-
-Each worker runs one job at a time, so 8 workers run 8 jobs at the same time.
-
-## Stress test
-
-`scripts/stress.py` sends a burst of mixed jobs (including webhooks that fail and retry) to
-the running stack, cancels about 10% of them, adds scheduled jobs, and prints a live view, a
-queue-wait table per priority and a summary. It exits 1 if a check fails: it timed out, a job
-is stuck, the idempotency key created more than one job, a cancel and a claim both won (or
-neither), a scheduled job started early, or a job completed twice. For a fast run, put these lines in
-`.env` and run `docker compose up -d`:
-
-```
-WEBHOOK_FAILURE_RATE=0.2
-JOB_SLEEP_SCALE=0.1
-BACKOFF_SECONDS=2,4,8
-```
-
-```bash
-uv run python scripts/stress.py --jobs 120
-```
-
-## Settings
-
-All settings are environment variables with defaults, listed in [.env.example](.env.example).
-The compose file passes `.env` to the api, workers and scheduler. `DATABASE_URL` and
-`REDIS_URL` are set by compose and have no default: a service without them stops at startup
-and names the missing variable.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `LEASE_SECONDS` | 30 | How long a worker owns a job without a heartbeat. Must be larger than `HEARTBEAT_SECONDS`. |
-| `HEARTBEAT_SECONDS` | 10 | How often a running worker extends its lease. |
-| `BACKOFF_SECONDS` | 0.1,30,120 | Delay before retry 1, 2, 3. |
-| `JOB_TIMEOUTS` | email:10,webhook:10,report:15 | Maximum run time per type. Batch has none and is watched for stalls (`STALL_SECONDS`, 60). |
-| `WEBHOOK_FAILURE_RATE` | 0.2 | Chance that a webhook attempt fails on purpose. |
-| `JOB_SLEEP_SCALE` | 1.0 | Multiplies the simulated work time of every handler. |
+goes back to `pending` after a backoff delay. A job can be `cancelled` only from `pending` or
+`scheduled`.
