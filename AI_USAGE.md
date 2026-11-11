@@ -15,12 +15,12 @@ I designed the skeleton and the ai found the blind spots for exemple
 
 ## What I Had to Fix
 
-1. Missing self-fence. Claude Code's worker did nothing when the heartbeat
+- Missing self-fence. Claude Code's worker did nothing when the heartbeat
    couldn't reach Postgres, so the lease expired and two workers ran the same
    job. Caught in review. fix, no successful heartbeat for 20 s os._exit(1).
    Verified by pausing Postgres mid-job.
 
-2. Claim design. The AI had workers claim from Postgres with SKIP LOCKED. I
+- Claim design. The AI had workers claim from Postgres with SKIP LOCKED. I
    changed it to Redis dispatch plus a Postgres relay: no claim contention,
    and Redis can be wiped without losing a job.
 
