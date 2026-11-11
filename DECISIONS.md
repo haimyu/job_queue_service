@@ -36,10 +36,17 @@
   the job runs at once → retry 1 after 0.1 s → retry 2 after 30 s → retry 3 after 120 s →
   `failed`.
 
-## 5. One Thing I Would Do Differently With More Time
-Checkpoint long jobs. A batch that is stopped by a deploy or a crash restarts from the first
-item. I would save progress at every heartbeat, hand the job back on shutdown, and resume
-from the checkpoint.
+## 5. Things I Would Do Differently With More Time
 
-Improve the dead letter queue. Failed jobs only keep an error message. I would add a failure
-reason and bulk replay.
+- **Relay redesign (the main one).** Every second the relay selects up to 1000 due jobs and
+  re-adds all of them to Redis, even those already queued. The work per cycle is bounded by
+  the `LIMIT`, so it does not blow up, but it is wasted work on every cycle and the scalability
+  ceiling of the design. I would track what is already queued, or relay only newly due jobs.
+- **Priority aging.** Workers always pop the highest priority first, so a steady stream of
+  high-priority jobs can starve low-priority ones. I would raise a job's effective priority
+  the longer it waits.
+- **Checkpoint long jobs.** A batch stopped by a deploy or a crash restarts from the first
+  item. I would save progress at every heartbeat, release the lease on shutdown, and resume
+  from the checkpoint.
+- **Improve the dead letter queue.** Failed jobs only keep an error message. I would add a
+  failure reason and bulk replay.
