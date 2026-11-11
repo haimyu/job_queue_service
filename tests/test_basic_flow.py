@@ -1,8 +1,10 @@
+import json
 import uuid
 
 from conftest import process_next
 
 from job_queue_service import db, scheduler
+from job_queue_service.models import MAX_PAYLOAD_BYTES
 from job_queue_service.redis_client import QUEUE_READY
 
 EMAIL = {
@@ -95,3 +97,23 @@ def test_health_reports_postgres_and_redis(client):
     assert response.status_code == 200
     assert response.json()["postgres"] is True
     assert response.json()["redis"] is True
+
+
+def webhook_of_size(size: int) -> dict:
+    """A valid webhook job whose payload serializes to exactly `size` characters."""
+    payload = {"url": "https://example.com/hook", "body": {"x": ""}}
+    padding = size - len(json.dumps(payload))
+    payload["body"]["x"] = "a" * padding
+    assert len(json.dumps(payload)) == size
+    return {"type": "webhook", "payload": payload}
+
+
+def test_payload_at_the_size_limit_is_accepted(client):
+    response = client.post("/jobs", json=webhook_of_size(MAX_PAYLOAD_BYTES))
+    assert response.status_code == 201
+
+
+def test_payload_over_the_size_limit_is_rejected_and_creates_no_row(client, conn):
+    response = client.post("/jobs", json=webhook_of_size(MAX_PAYLOAD_BYTES + 1))
+    assert response.status_code == 422
+    assert conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"] == 0

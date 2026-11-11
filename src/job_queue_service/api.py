@@ -61,7 +61,12 @@ def create_job(
             if job is not None:
                 break
             found = db.get_job_by_idempotency_key(
-                conn, idempotency_key, body.type, body.payload
+                conn,
+                idempotency_key,
+                body.type,
+                body.payload,
+                body.priority,
+                body.max_attempts,
             )
             if found is None:
                 continue

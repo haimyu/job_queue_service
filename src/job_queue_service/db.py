@@ -85,20 +85,34 @@ def insert_job(
 
 
 def get_job_by_idempotency_key(
-    conn: Connection, key: str, job_type: str, payload: dict
+    conn: Connection,
+    key: str,
+    job_type: str,
+    payload: dict,
+    priority: int,
+    max_attempts: int,
 ) -> tuple[dict, bool] | None:
     """Find the job that owns an idempotency key.
 
-    Returns (job, same_request), where same_request is true when the type and the
-    payload (compared as jsonb) match. Returns None when no job has the key, for
+    Returns (job, same_request), where same_request is true when the type, payload
+    (compared as jsonb), priority and max_attempts match. run_at is not compared:
+    it is stored in available_at, which changes on retry and reap. Returns None when no job has the key, for
     example because the key expired between the insert and this select.
     """
     job = conn.execute(
         """
-        SELECT *, (type = %(type)s AND payload = %(payload)s) AS same_request
+        SELECT *, (type = %(type)s AND payload = %(payload)s
+                   AND priority = %(priority)s
+                   AND max_attempts = %(max_attempts)s) AS same_request
         FROM jobs WHERE idempotency_key = %(key)s
         """,
-        {"key": key, "type": job_type, "payload": Jsonb(payload)},
+        {
+            "key": key,
+            "type": job_type,
+            "payload": Jsonb(payload),
+            "priority": priority,
+            "max_attempts": max_attempts,
+        },
     ).fetchone()
     if job is None:
         return None
@@ -120,12 +134,16 @@ def list_logs(conn: Connection, job_id: UUID) -> list[dict]:
 
 
 def select_due_pending(conn: Connection) -> list[dict]:
-    """Relay select: pending jobs whose available_at has passed, oldest first."""
+    """Relay select: due pending jobs, highest priority first, then oldest.
+
+    Priority comes first so that a backlog larger than the LIMIT cannot hide a
+    high-priority job behind older low-priority ones.
+    """
     return conn.execute(
         """
         SELECT id, priority FROM jobs
         WHERE status = 'pending' AND available_at <= now()
-        ORDER BY available_at
+        ORDER BY priority DESC, available_at
         LIMIT 1000
         """
     ).fetchall()

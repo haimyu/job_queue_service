@@ -30,4 +30,13 @@ low priority can starve.
 Approach: backoff stored in available_at, not sleep(), so the worker is
 free at once and a crash can't lose the retry. Permanent errors fail
 immediately.
-Timing: immediate → 30 s → 2 min → failed (3 attempts).
+Timing: 4 attempts by default: run 1 immediately → run 2 after 0.1 s → run 3 after 30 s → run 4 after 120 s → failed.
+
+## 5. One Thing I Would Do Differently With More Time
+
+Checkpoint long jobs. A batch that is stopped by a deploy or a crash restarts from the first
+item. I would save progress at every heartbeat, hand the job back on shutdown, and resume
+from the checkpoint.
+
+Improve the dead letter queue. Failed jobs only keep an error message. I would add a failure
+reason and bulk replay.

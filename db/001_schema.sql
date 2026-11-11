@@ -21,7 +21,7 @@ CREATE TABLE jobs (
 );
 
 -- relay: due pending jobs
-CREATE INDEX jobs_pending_due_idx ON jobs (available_at) WHERE status = 'pending';
+CREATE INDEX jobs_pending_due_idx ON jobs (priority DESC, available_at) WHERE status = 'pending';
 -- scheduler: due scheduled jobs
 CREATE INDEX jobs_scheduled_due_idx ON jobs (available_at) WHERE status = 'scheduled';
 -- reaper: expired leases

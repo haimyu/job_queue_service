@@ -15,8 +15,8 @@ You need Docker with the compose plugin.
 cp .env.example .env
 ```
 
-Open `.env` and give the three `POSTGRES_` values a value (for example `jobs` for all three).
-They are the database credentials. The file is git-ignored.
+`.env.example` already holds working values (the `POSTGRES_` database credentials). The
+`.env` file is git-ignored.
 
 ```bash
 docker compose up -d --build       # api, 3 workers, scheduler, postgres, redis
@@ -27,7 +27,8 @@ curl -s localhost:8000/health      # ready when "live_workers" is 3
 - Interactive API docs (try every endpoint in the browser): http://localhost:8000/docs
 - Stop: `docker compose down`. Stop and delete the database: `docker compose down -v`.
 - The database schema is applied only when the database volume is empty. After changing
-  `db/001_schema.sql`, run `docker compose down -v`.
+  `db/001_schema.sql`, run `docker compose down -v`. The relay index `jobs_pending_due_idx`
+  changed (it is now `(priority DESC, available_at)`), so an existing database needs this.
 
 ### Logs
 
