@@ -55,6 +55,23 @@ uv run ruff check
 The tests read the `POSTGRES_` values from your `.env`. Some tests start real worker
 processes, kill them, and freeze the database connection, so the full run takes about 25 seconds.
 
+**Windows:** run the same commands. Three process-level tests are skipped there:
+the 200-job test with 3 worker processes, the SIGTERM test and the idle-worker shutdown test.
+Windows has no inter-process SIGTERM (`Popen.send_signal(SIGTERM)` calls `TerminateProcess`,
+a hard kill with exit code 1), so graceful shutdown cannot be tested. The worker itself runs
+fine on Windows. The full suite (91 tests) runs on Linux and macOS.
+
+To run every test on any OS, use a Linux container. Start postgres and redis first, then run
+this from the project root (it needs host networking; on Docker Desktop turn on "Enable host
+networking"; with WSL 2 you can instead run the commands above inside WSL):
+
+```bash
+docker compose up -d postgres redis
+docker run --rm --network host -v "$PWD":/app:z -w /app \
+  -e UV_PROJECT_ENVIRONMENT=/tmp/venv -e UV_LINK_MODE=copy -e PYTHONDONTWRITEBYTECODE=1 \
+  ghcr.io/astral-sh/uv:python3.14-bookworm-slim uv run pytest -p no:cacheprovider
+```
+
 ## Submit jobs
 
 Every request returns the job. Save its `id`, then poll `GET /jobs/{id}` until `status` is

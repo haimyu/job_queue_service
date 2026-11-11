@@ -1,9 +1,19 @@
 import signal
+import sys
 import time
 from datetime import UTC, datetime
 from uuid import uuid7
 
+import pytest
+
 from job_queue_service import db, redis_client, scheduler
+
+skip_on_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no inter-process SIGTERM: Popen.send_signal(SIGTERM) calls "
+    "TerminateProcess, which hard-kills with exit code 1, so graceful shutdown "
+    "cannot be exercised.",
+)
 
 PAYLOADS = {
     "email": {"to": "a@example.com", "subject": "Hi", "body": "Hello"},
@@ -27,6 +37,7 @@ def log_messages(conn, job_id) -> list[str]:
 # ---------- real worker processes ----------
 
 
+@skip_on_windows
 def test_three_worker_processes_complete_200_jobs_with_one_claim_each(
     conn, r, spawn_worker, wait_until
 ):
@@ -80,6 +91,7 @@ def test_job_of_a_killed_worker_is_recovered_and_finished_by_another(
     assert messages.count("lease expired, job reaped") == 1
 
 
+@skip_on_windows
 def test_sigterm_finishes_the_running_job_then_exits_with_code_zero(
     conn, r, spawn_worker, wait_until
 ):
@@ -96,6 +108,7 @@ def test_sigterm_finishes_the_running_job_then_exits_with_code_zero(
     assert (job["status"], job["attempts"]) == ("pending", 0)  # never started
 
 
+@skip_on_windows
 def test_idle_worker_stops_promptly_and_removes_its_liveness_key(
     r, spawn_worker, wait_until
 ):
